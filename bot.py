@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 
@@ -9,11 +10,43 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_PATH = "markov.db"
+DB_PATH = os.getenv("DB_PATH", "markov.db")
 MIN_MESSAGES = 50
 SCRAPE_LIMIT = 500
 MAX_SENTENCES = 5
 STATE_SIZE = 2
+MIN_WORDS = 4
+
+URL_RE = re.compile(r"https?://\S+")
+EMOJI_ONLY_RE = re.compile(r"^[\s<:\w>]+$")
+CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+UNICODE_EMOJI_RANGES = re.compile(
+    "["
+    "\U0001f600-\U0001f64f"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f1e0-\U0001f1ff"
+    "\U00002702-\U000027b0"
+    "\U0000fe00-\U0000fe0f"
+    "\U0000200d"
+    "\U00002640-\U00002642"
+    "\U000023cf-\U000023fa"
+    "\U0000200b-\U0000200f"
+    "]+",
+)
+
+
+def is_quality_message(text: str) -> bool:
+    stripped = URL_RE.sub("", text).strip()
+    if not stripped:
+        return False
+    if len(stripped.split()) < MIN_WORDS:
+        return False
+    no_emoji = CUSTOM_EMOJI_RE.sub("", stripped)
+    no_emoji = UNICODE_EMOJI_RANGES.sub("", no_emoji).strip()
+    if not no_emoji:
+        return False
+    return True
 
 
 def init_db():
@@ -30,6 +63,13 @@ def init_db():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_guild_user
         ON messages(guild_id, user_id)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS opted_out (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
     """)
     conn.commit()
     return conn
@@ -59,6 +99,34 @@ def message_count(conn, guild_id: int, user_id: int) -> int:
     return cursor.fetchone()[0]
 
 
+def is_opted_out(conn, guild_id: int, user_id: int) -> bool:
+    cursor = conn.execute(
+        "SELECT 1 FROM opted_out WHERE guild_id = ? AND user_id = ?",
+        (guild_id, user_id),
+    )
+    return cursor.fetchone() is not None
+
+
+def opt_out(conn, guild_id: int, user_id: int):
+    conn.execute(
+        "INSERT OR IGNORE INTO opted_out (guild_id, user_id) VALUES (?, ?)",
+        (guild_id, user_id),
+    )
+    conn.execute(
+        "DELETE FROM messages WHERE guild_id = ? AND user_id = ?",
+        (guild_id, user_id),
+    )
+    conn.commit()
+
+
+def opt_in(conn, guild_id: int, user_id: int):
+    conn.execute(
+        "DELETE FROM opted_out WHERE guild_id = ? AND user_id = ?",
+        (guild_id, user_id),
+    )
+    conn.commit()
+
+
 def generate_sentences(corpus: list[str], count: int) -> list[str]:
     text = "\n".join(corpus)
     model = markovify.NewlineText(text, state_size=STATE_SIZE)
@@ -83,6 +151,8 @@ class MarkovBot(discord.Client):
 
     async def setup_hook(self):
         self.tree.add_command(mimic)
+        self.tree.add_command(markovme)
+        self.tree.add_command(optout)
         await self.tree.sync()
 
     async def on_ready(self):
@@ -97,7 +167,9 @@ class MarkovBot(discord.Client):
             return
 
         content = message.content.strip()
-        if not content:
+        if not content or not is_quality_message(content):
+            return
+        if is_opted_out(self.db, message.guild.id, message.author.id):
             return
         store_message(self.db, message.guild.id, message.author.id, content)
 
@@ -112,13 +184,17 @@ class MarkovBot(discord.Client):
             await message.reply("I can't mimic bots.")
             return
 
+        if is_opted_out(self.db, message.guild.id, target.id):
+            await message.reply(f"**{target.display_name}** has opted out of markov.")
+            return
+
         guild_id = message.guild.id
         stored = message_count(self.db, guild_id, target.id)
 
         if stored < MIN_MESSAGES:
             scraped = 0
             async for msg in message.channel.history(limit=SCRAPE_LIMIT):
-                if msg.author.id == target.id and not msg.author.bot and msg.content.strip():
+                if msg.author.id == target.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
                     store_message(self.db, guild_id, target.id, msg.content.strip())
                     scraped += 1
             stored += scraped
@@ -167,13 +243,19 @@ async def mimic(
         await interaction.response.send_message("I can't mimic bots.", ephemeral=True)
         return
 
+    if is_opted_out(bot.db, interaction.guild.id, user.id):
+        await interaction.response.send_message(
+            f"**{user.display_name}** has opted out of markov.", ephemeral=True
+        )
+        return
+
     stored = message_count(bot.db, interaction.guild.id, user.id)
 
     if stored < MIN_MESSAGES:
         await interaction.response.defer()
         scraped = 0
         async for msg in interaction.channel.history(limit=SCRAPE_LIMIT):
-            if msg.author.id == user.id and not msg.author.bot and msg.content.strip():
+            if msg.author.id == user.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
                 store_message(bot.db, interaction.guild.id, user.id, msg.content.strip())
                 scraped += 1
         stored += scraped
@@ -217,6 +299,83 @@ async def mimic(
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.followup.send(embed=embed)
+
+
+@app_commands.command(name="markovme", description="Generate a message mimicking yourself")
+@app_commands.describe(count="Number of sentences to generate (1-5, default 1)")
+async def markovme(interaction: discord.Interaction, count: int = 1):
+    count = max(1, min(count, MAX_SENTENCES))
+    user = interaction.user
+
+    if is_opted_out(bot.db, interaction.guild.id, user.id):
+        await interaction.response.send_message(
+            "You've opted out of markov. Use `/optout` to opt back in first.", ephemeral=True
+        )
+        return
+
+    stored = message_count(bot.db, interaction.guild.id, user.id)
+
+    if stored < MIN_MESSAGES:
+        await interaction.response.defer()
+        scraped = 0
+        async for msg in interaction.channel.history(limit=SCRAPE_LIMIT):
+            if msg.author.id == user.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
+                store_message(bot.db, interaction.guild.id, user.id, msg.content.strip())
+                scraped += 1
+        stored += scraped
+
+    if stored < 10:
+        msg = "Not enough data to mimic you yet. Keep chatting!"
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
+        return
+
+    corpus = get_messages(bot.db, interaction.guild.id, user.id)
+
+    try:
+        sentences = generate_sentences(corpus, count)
+    except Exception:
+        sentences = []
+
+    if not sentences:
+        msg = "Couldn't generate anything. Your messages might be too short or repetitive."
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        description="\n\n".join(sentences),
+        color=user.color if user.color != discord.Color.default() else discord.Color.blurple(),
+    )
+    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    embed.set_footer(text="Generated with markovify")
+
+    if not interaction.response.is_done():
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.followup.send(embed=embed)
+
+
+@app_commands.command(name="optout", description="Opt out or back in to markov data collection")
+async def optout(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    user_id = interaction.user.id
+
+    if is_opted_out(bot.db, guild_id, user_id):
+        opt_in(bot.db, guild_id, user_id)
+        await interaction.response.send_message(
+            "You've opted back in. Your messages will be collected again.", ephemeral=True
+        )
+    else:
+        opt_out(bot.db, guild_id, user_id)
+        await interaction.response.send_message(
+            "You've opted out. All your stored messages have been deleted and no new ones will be collected.",
+            ephemeral=True,
+        )
 
 
 token = os.getenv("DISCORD_TOKEN")
