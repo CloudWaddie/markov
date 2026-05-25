@@ -76,6 +76,21 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         mock_channel.typing.assert_called_once()
         typing_mock.__aenter__.assert_called_once()
 
+    def test_generate_sentences_strict_overlap(self):
+        from bot import generate_sentences
+        # Corpus designed so that it can generate a novel sentence "x y e f z w" (6 words).
+        # This sentence overlaps with "x y e f g h i j" by 4 words (66.6%) and "a b c d e f z w" by 4 words (66.6%).
+        # Under default 0.70 max_overlap_ratio, this is allowed and it will generate a sentence.
+        # Under our new stricter 0.55 ratio, this should be rejected, returning []
+        corpus = [
+            "a b c d e f g h i j",
+            "x y e f g h i j",
+            "a b c d e f z w"
+        ]
+        results = generate_sentences(corpus, 100) # request many times to ensure it runs
+        self.assertEqual(results, [])
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DB_PATH = os.getenv("DB_PATH", "markov.db")
-MIN_MESSAGES = 50
-SCRAPE_LIMIT = 500
+MIN_MESSAGES = 100
+SCRAPE_LIMIT = 1000
 MAX_SENTENCES = 5
 STATE_SIZE = 2
 MIN_WORDS = 4
@@ -112,7 +112,11 @@ def generate_sentences(corpus: list[str], count: int) -> list[str]:
     model = markovify.NewlineText(text, state_size=STATE_SIZE)
     sentences = []
     for _ in range(count * 3):
-        sentence = model.make_sentence(tries=100)
+        sentence = model.make_sentence(
+            tries=100,
+            max_overlap_ratio=0.55,
+            max_overlap_total=10
+        )
         if sentence and sentence not in sentences:
             sentences.append(sentence)
         if len(sentences) >= count:
