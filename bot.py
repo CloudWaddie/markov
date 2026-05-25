@@ -135,6 +135,7 @@ class MarkovBot(discord.Client):
         await self.tree.sync()
 
     async def on_ready(self):
+        await self.change_presence(status=discord.Status.online)
         print(f"Logged in as {self.user} (ID: {self.user.id})")
 
     async def on_message(self, message: discord.Message):
