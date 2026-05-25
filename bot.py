@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timezone
+import contextlib
 
 import discord
 from discord import app_commands
@@ -168,40 +169,41 @@ class MarkovBot(discord.Client):
             await message.reply(f"**{target.display_name}** has opted out of markov.")
             return
 
-        guild_id = message.guild.id
-        stored = message_count(self.db, guild_id, target.id)
+        async with message.channel.typing():
+            guild_id = message.guild.id
+            stored = message_count(self.db, guild_id, target.id)
 
-        if stored < MIN_MESSAGES:
-            scraped = 0
-            async for msg in message.channel.history(limit=SCRAPE_LIMIT):
-                if msg.author.id == target.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
-                    store_message(self.db, guild_id, target.id, msg.content.strip())
-                    scraped += 1
-            stored += scraped
+            if stored < MIN_MESSAGES:
+                scraped = 0
+                async for msg in message.channel.history(limit=SCRAPE_LIMIT):
+                    if msg.author.id == target.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
+                        store_message(self.db, guild_id, target.id, msg.content.strip())
+                        scraped += 1
+                stored += scraped
 
-        if stored < 10:
-            await message.reply(f"Not enough data for **{target.display_name}**. They need to chat more!")
-            return
+            if stored < 10:
+                await message.reply(f"Not enough data for **{target.display_name}**. They need to chat more!")
+                return
 
-        corpus = get_messages(self.db, guild_id, target.id)
+            corpus = get_messages(self.db, guild_id, target.id)
 
-        try:
-            sentences = generate_sentences(corpus, 1)
-        except Exception:
-            sentences = []
+            try:
+                sentences = generate_sentences(corpus, 1)
+            except Exception:
+                sentences = []
 
-        if not sentences:
-            await message.reply(f"Couldn't generate anything for **{target.display_name}**.")
-            return
+            if not sentences:
+                await message.reply(f"Couldn't generate anything for **{target.display_name}**.")
+                return
 
-        embed = discord.Embed(
-            description=sentences[0],
-            color=target.color if target.color != discord.Color.default() else discord.Color.blurple(),
-        )
-        embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
-        embed.set_footer(text="Generated with markovify")
+            embed = discord.Embed(
+                description=sentences[0],
+                color=target.color if target.color != discord.Color.default() else discord.Color.blurple(),
+            )
+            embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
+            embed.set_footer(text="Generated with markovify")
 
-        await message.reply(embed=embed)
+            await message.reply(embed=embed)
 
 
 bot = MarkovBot()
@@ -229,56 +231,58 @@ async def mimic(
         )
         return
 
-    stored = message_count(bot.db, interaction.guild.id, user.id)
+    ctx = interaction.channel.typing() if interaction.channel else contextlib.nullcontext()
+    async with ctx:
+        stored = message_count(bot.db, interaction.guild.id, user.id)
 
-    if stored < MIN_MESSAGES:
-        await interaction.response.defer()
-        scraped = 0
-        async for msg in interaction.channel.history(limit=SCRAPE_LIMIT):
-            if msg.author.id == user.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
-                store_message(bot.db, interaction.guild.id, user.id, msg.content.strip())
-                scraped += 1
-        stored += scraped
+        if stored < MIN_MESSAGES:
+            await interaction.response.defer()
+            scraped = 0
+            async for msg in interaction.channel.history(limit=SCRAPE_LIMIT):
+                if msg.author.id == user.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
+                    store_message(bot.db, interaction.guild.id, user.id, msg.content.strip())
+                    scraped += 1
+            stored += scraped
 
-    if stored < 10:
+        if stored < 10:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"Not enough data for **{user.display_name}**. They need to chat more!",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"Not enough data for **{user.display_name}**. They need to chat more!",
+                    ephemeral=True,
+                )
+            return
+
+        corpus = get_messages(bot.db, interaction.guild.id, user.id)
+
+        try:
+            sentences = generate_sentences(corpus, count)
+        except Exception:
+            sentences = []
+
+        if not sentences:
+            msg = f"Couldn't generate anything for **{user.display_name}**. Their messages might be too short or repetitive."
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            description="\n\n".join(sentences),
+            color=user.color if user.color != discord.Color.default() else discord.Color.blurple(),
+        )
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+        embed.set_footer(text="Generated with markovify")
+
         if not interaction.response.is_done():
-            await interaction.response.send_message(
-                f"Not enough data for **{user.display_name}**. They need to chat more!",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(embed=embed)
         else:
-            await interaction.followup.send(
-                f"Not enough data for **{user.display_name}**. They need to chat more!",
-                ephemeral=True,
-            )
-        return
-
-    corpus = get_messages(bot.db, interaction.guild.id, user.id)
-
-    try:
-        sentences = generate_sentences(corpus, count)
-    except Exception:
-        sentences = []
-
-    if not sentences:
-        msg = f"Couldn't generate anything for **{user.display_name}**. Their messages might be too short or repetitive."
-        if not interaction.response.is_done():
-            await interaction.response.send_message(msg, ephemeral=True)
-        else:
-            await interaction.followup.send(msg, ephemeral=True)
-        return
-
-    embed = discord.Embed(
-        description="\n\n".join(sentences),
-        color=user.color if user.color != discord.Color.default() else discord.Color.blurple(),
-    )
-    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-    embed.set_footer(text="Generated with markovify")
-
-    if not interaction.response.is_done():
-        await interaction.response.send_message(embed=embed)
-    else:
-        await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed)
 
 
 @app_commands.command(name="markovme", description="Generate a message mimicking yourself")
@@ -293,51 +297,53 @@ async def markovme(interaction: discord.Interaction, count: int = 1):
         )
         return
 
-    stored = message_count(bot.db, interaction.guild.id, user.id)
+    ctx = interaction.channel.typing() if interaction.channel else contextlib.nullcontext()
+    async with ctx:
+        stored = message_count(bot.db, interaction.guild.id, user.id)
 
-    if stored < MIN_MESSAGES:
-        await interaction.response.defer()
-        scraped = 0
-        async for msg in interaction.channel.history(limit=SCRAPE_LIMIT):
-            if msg.author.id == user.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
-                store_message(bot.db, interaction.guild.id, user.id, msg.content.strip())
-                scraped += 1
-        stored += scraped
+        if stored < MIN_MESSAGES:
+            await interaction.response.defer()
+            scraped = 0
+            async for msg in interaction.channel.history(limit=SCRAPE_LIMIT):
+                if msg.author.id == user.id and not msg.author.bot and msg.content.strip() and is_quality_message(msg.content.strip()):
+                    store_message(bot.db, interaction.guild.id, user.id, msg.content.strip())
+                    scraped += 1
+            stored += scraped
 
-    if stored < 10:
-        msg = "Not enough data to mimic you yet. Keep chatting!"
+        if stored < 10:
+            msg = "Not enough data to mimic you yet. Keep chatting!"
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
+            return
+
+        corpus = get_messages(bot.db, interaction.guild.id, user.id)
+
+        try:
+            sentences = generate_sentences(corpus, count)
+        except Exception:
+            sentences = []
+
+        if not sentences:
+            msg = "Couldn't generate anything. Your messages might be too short or repetitive."
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            description="\n\n".join(sentences),
+            color=user.color if user.color != discord.Color.default() else discord.Color.blurple(),
+        )
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+        embed.set_footer(text="Generated with markovify")
+
         if not interaction.response.is_done():
-            await interaction.response.send_message(msg, ephemeral=True)
+            await interaction.response.send_message(embed=embed)
         else:
-            await interaction.followup.send(msg, ephemeral=True)
-        return
-
-    corpus = get_messages(bot.db, interaction.guild.id, user.id)
-
-    try:
-        sentences = generate_sentences(corpus, count)
-    except Exception:
-        sentences = []
-
-    if not sentences:
-        msg = "Couldn't generate anything. Your messages might be too short or repetitive."
-        if not interaction.response.is_done():
-            await interaction.response.send_message(msg, ephemeral=True)
-        else:
-            await interaction.followup.send(msg, ephemeral=True)
-        return
-
-    embed = discord.Embed(
-        description="\n\n".join(sentences),
-        color=user.color if user.color != discord.Color.default() else discord.Color.blurple(),
-    )
-    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-    embed.set_footer(text="Generated with markovify")
-
-    if not interaction.response.is_done():
-        await interaction.response.send_message(embed=embed)
-    else:
-        await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed)
 
 
 @app_commands.command(name="optout", description="Opt out or back in to markov data collection")

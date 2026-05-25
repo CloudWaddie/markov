@@ -33,9 +33,49 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         await bot_instance.on_ready()
         mock_change_presence.assert_called_once_with(status=discord.Status.online)
 
+    @patch("bot.is_opted_out")
+    @patch("bot.message_count")
+    @patch("bot.get_messages")
+    async def test_handle_reply_mimic_uses_typing(self, mock_get_messages, mock_message_count, mock_is_opted_out):
+        mock_is_opted_out.return_value = False
+        mock_message_count.return_value = 50
+        mock_get_messages.return_value = ["hello world style message", "another test message here"]
 
+        bot_instance = MarkovBot()
+        
+        # Mock message and channel
+        mock_msg = AsyncMock(spec=discord.Message)
+        mock_msg.guild = MagicMock(spec=discord.Guild)
+        mock_msg.guild.id = 123
+        mock_msg.author = MagicMock(spec=discord.Member)
+        mock_msg.author.id = 456
+        mock_msg.author.bot = False
+        mock_msg.mentions = [bot_instance.user]
+        mock_msg.reference = MagicMock()
+        mock_msg.reference.message_id = 789
+        
+        mock_replied = AsyncMock(spec=discord.Message)
+        mock_replied.author = MagicMock(spec=discord.Member)
+        mock_replied.author.bot = False
+        mock_replied.author.id = 456
+        mock_replied.author.display_name = "TargetUser"
+        mock_replied.author.color = discord.Color.default()
+        mock_replied.author.display_avatar.url = "http://example.com/avatar.png"
+        
+        mock_channel = AsyncMock(spec=discord.TextChannel)
+        mock_channel.fetch_message.return_value = mock_replied
+        
+        # Setup typing context manager mock
+        typing_mock = AsyncMock()
+        mock_channel.typing.return_value = typing_mock
+        mock_msg.channel = mock_channel
+        
+        await bot_instance.handle_reply_mimic(mock_msg)
+        
+        # Verify typing was entered
+        mock_channel.typing.assert_called_once()
+        typing_mock.__aenter__.assert_called_once()
 
 
 if __name__ == "__main__":
     unittest.main()
-
