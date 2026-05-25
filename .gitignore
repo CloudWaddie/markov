@@ -1,0 +1,4 @@
+.env
+markov.db
+__pycache__/
+*.pyc
