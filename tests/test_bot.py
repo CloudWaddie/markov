@@ -13,6 +13,14 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         # E.g., "😊 😊 😊 😊" has 4 words/emojis.
         self.assertTrue(is_quality_message("😊 😊 😊 😊"))
 
+    def test_message_with_words_and_emojis(self):
+        self.assertTrue(is_quality_message("This is a test 😊"))
+
+    def test_message_with_only_custom_emojis(self):
+        # <:emoji:12345> style custom emojis
+        self.assertTrue(is_quality_message("<:emoji:12345> <:emoji:12345> <:emoji:12345> <:emoji:12345>"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -18,35 +18,14 @@ STATE_SIZE = 2
 MIN_WORDS = 4
 
 URL_RE = re.compile(r"https?://\S+")
-EMOJI_ONLY_RE = re.compile(r"^[\s<:\w>]+$")
-CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
-UNICODE_EMOJI_RANGES = re.compile(
-    "["
-    "\U0001f600-\U0001f64f"
-    "\U0001f300-\U0001f5ff"
-    "\U0001f680-\U0001f6ff"
-    "\U0001f1e0-\U0001f1ff"
-    "\U00002702-\U000027b0"
-    "\U0000fe00-\U0000fe0f"
-    "\U0000200d"
-    "\U00002640-\U00002642"
-    "\U000023cf-\U000023fa"
-    "\U0000200b-\U0000200f"
-    "]+",
-)
-
-
 def is_quality_message(text: str) -> bool:
     stripped = URL_RE.sub("", text).strip()
     if not stripped:
         return False
     if len(stripped.split()) < MIN_WORDS:
         return False
-    no_emoji = CUSTOM_EMOJI_RE.sub("", stripped)
-    no_emoji = UNICODE_EMOJI_RANGES.sub("", no_emoji).strip()
-    if not no_emoji:
-        return False
     return True
+
 
 
 def init_db():
