@@ -91,10 +91,61 @@ class MarkovBot(discord.Client):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
+
+        if message.reference and self.user in message.mentions:
+            await self.handle_reply_mimic(message)
+            return
+
         content = message.content.strip()
         if not content:
             return
         store_message(self.db, message.guild.id, message.author.id, content)
+
+    async def handle_reply_mimic(self, message: discord.Message):
+        try:
+            replied = await message.channel.fetch_message(message.reference.message_id)
+        except discord.NotFound:
+            return
+
+        target = replied.author
+        if target.bot:
+            await message.reply("I can't mimic bots.")
+            return
+
+        guild_id = message.guild.id
+        stored = message_count(self.db, guild_id, target.id)
+
+        if stored < MIN_MESSAGES:
+            scraped = 0
+            async for msg in message.channel.history(limit=SCRAPE_LIMIT):
+                if msg.author.id == target.id and not msg.author.bot and msg.content.strip():
+                    store_message(self.db, guild_id, target.id, msg.content.strip())
+                    scraped += 1
+            stored += scraped
+
+        if stored < 10:
+            await message.reply(f"Not enough data for **{target.display_name}**. They need to chat more!")
+            return
+
+        corpus = get_messages(self.db, guild_id, target.id)
+
+        try:
+            sentences = generate_sentences(corpus, 1)
+        except Exception:
+            sentences = []
+
+        if not sentences:
+            await message.reply(f"Couldn't generate anything for **{target.display_name}**.")
+            return
+
+        embed = discord.Embed(
+            description=sentences[0],
+            color=target.color if target.color != discord.Color.default() else discord.Color.blurple(),
+        )
+        embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
+        embed.set_footer(text="Generated with markovify")
+
+        await message.reply(embed=embed)
 
 
 bot = MarkovBot()
